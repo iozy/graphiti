@@ -34,6 +34,64 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = 'gpt-4.1-mini'
 
 
+def _flatten_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Flatten JSON schema to remove $defs/$ref for llama.cpp compatibility."""
+    if not isinstance(schema, dict):
+        return schema
+
+    if '$defs' not in schema:
+        return schema
+
+    defs = schema.get('$defs', {})
+
+    def resolve_refs(obj):
+        if not isinstance(obj, dict):
+            return obj
+
+        if '$ref' in obj:
+            ref_path = obj['$ref']
+            if ref_path.startswith('#/$defs/'):
+                def_name = ref_path.split('/')[-1]
+                if def_name in defs:
+                    return resolve_refs(defs[def_name].copy())
+            return obj
+
+        return {k: resolve_refs(v) for k, v in obj.items()}
+
+    return resolve_refs(schema)
+
+
+def _normalize_entity_fields(data: dict[str, Any]) -> dict[str, Any]:
+    """Normalize entity field names from LLM responses.
+
+    Some models (especially through llama.cpp) return 'entity' instead of 'name'
+    even when the schema specifies 'name'. This function normalizes those mismatches.
+    """
+    if not isinstance(data, dict):
+        return data
+
+    result = {}
+    for key, value in data.items():
+        if key == 'extracted_entities' and isinstance(value, list):
+            # Normalize entity objects in the list
+            normalized_entities = []
+            for entity in value:
+                if isinstance(entity, dict):
+                    # Map 'entity' field to 'name' if present
+                    normalized = {}
+                    if 'entity' in entity:
+                        normalized['name'] = entity.pop('entity')
+                    normalized.update(entity)
+                    normalized_entities.append(normalized)
+                else:
+                    normalized_entities.append(entity)
+            result[key] = normalized_entities
+        else:
+            result[key] = value
+
+    return result
+
+
 class OpenAIGenericClient(LLMClient):
     """
     OpenAIClient is a client class for interacting with OpenAI's language models.
@@ -112,11 +170,13 @@ class OpenAIGenericClient(LLMClient):
             if response_model is not None:
                 schema_name = getattr(response_model, '__name__', 'structured_response')
                 json_schema = response_model.model_json_schema()
+                # Flatten schema for llama.cpp compatibility (avoids $defs/$ref bug)
+                flattened_schema = _flatten_json_schema(json_schema)
                 response_format = {
                     'type': 'json_schema',
                     'json_schema': {
                         'name': schema_name,
-                        'schema': json_schema,
+                        'schema': flattened_schema,
                     },
                 }
 
@@ -128,7 +188,9 @@ class OpenAIGenericClient(LLMClient):
                 response_format=response_format,  # type: ignore[arg-type]
             )
             result = response.choices[0].message.content or ''
-            return json.loads(result)
+            parsed = json.loads(result)
+            # Post-process to normalize common field name mismatches from models that don't respect schema
+            return _normalize_entity_fields(parsed)
         except openai.RateLimitError as e:
             raise RateLimitError from e
         except Exception as e:

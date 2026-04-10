@@ -99,32 +99,66 @@ class LLMClientFactory:
 
     @staticmethod
     def create(config: LLMConfig) -> LLMClient:
-        """Create an LLM client based on the configured provider."""
+        """Create an LLM client based on the configured provider.
+
+        Environment variables take precedence over config file values.
+        Uses pydantic-style env var naming: LLM__PROVIDER, LLM__MODEL, etc.
+        """
         import logging
+        import os
 
         logger = logging.getLogger(__name__)
 
-        provider = config.provider.lower()
+        # Check environment variables FIRST (they take precedence over config file)
+        env_provider = os.environ.get('LLM__PROVIDER')
+        env_model = os.environ.get('LLM__MODEL')
+        env_temperature = os.environ.get('LLM__TEMPERATURE')
+        env_max_tokens = os.environ.get('LLM__MAX_TOKENS')
+
+        # Use env var if set, otherwise fall back to config
+        provider = (env_provider or config.provider).lower()
+        model = env_model or config.model
+        temperature = float(env_temperature) if env_temperature else (config.temperature or 0.7)
+        max_tokens = int(env_max_tokens) if env_max_tokens else (config.max_tokens or 4096)
+
+        logger.info(
+            f'LLM configuration - provider: {provider}, model: {model} (env override: {env_provider is not None})'
+        )
 
         match provider:
             case 'openai':
-                if not config.providers.openai:
+                import os
+
+                # Check env vars first, then config
+                env_api_key = os.environ.get('LLM__PROVIDERS__OPENAI__API_KEY')
+                env_api_url = os.environ.get('LLM__PROVIDERS__OPENAI__API_URL')
+
+                if not config.providers.openai and not env_api_key:
                     raise ValueError('OpenAI provider configuration not found')
 
-                api_key = config.providers.openai.api_key
+                api_key = (
+                    env_api_key or config.providers.openai.api_key
+                    if config.providers.openai
+                    else None
+                )
+                api_url = env_api_url or (
+                    config.providers.openai.api_url if config.providers.openai else None
+                )
+
                 _validate_api_key('OpenAI', api_key, logger)
 
                 from graphiti_core.llm_client.config import LLMConfig as CoreLLMConfig
 
                 # Use the same model for both main and small model slots
-                small_model = config.model
+                small_model = model
 
                 llm_config = CoreLLMConfig(
                     api_key=api_key,
-                    model=config.model,
+                    model=model,
                     small_model=small_model,
-                    temperature=config.temperature,
-                    max_tokens=config.max_tokens,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    base_url=api_url,
                 )
 
                 # Check if this is a reasoning model (o1, o3, gpt-5 family)
@@ -137,6 +171,44 @@ class LLMClientFactory:
                 else:
                     # For non-reasoning models, explicitly pass None to disable these parameters
                     return OpenAIClient(config=llm_config, reasoning=None, verbosity=None)
+
+            case 'openai_generic':
+                # OpenAI Generic client for OpenAI-compatible APIs (Ollama, LM Studio, etc.)
+                import os
+
+                # Check env vars FIRST for openai_generic provider
+                env_api_key = os.environ.get(
+                    'LLM__PROVIDERS__OPENAI_GENERIC__API_KEY',
+                    os.environ.get('LLM__API_KEY', 'ollama'),
+                )
+                env_api_url = os.environ.get(
+                    'LLM__PROVIDERS__OPENAI_GENERIC__API_URL',
+                    os.environ.get('LLM__BASE_URL', 'http://localhost:8080/v1'),
+                )
+
+                # Fallback to config if env vars not set
+                if not env_api_key or env_api_key == 'ollama':
+                    if config.providers.openai:
+                        env_api_key = config.providers.openai.api_key or 'ollama'
+                if not env_api_url or env_api_url == 'http://localhost:8080/v1':
+                    if config.providers.openai:
+                        env_api_url = config.providers.openai.api_url or 'http://localhost:8080/v1'
+
+                api_key = env_api_key
+                api_url = env_api_url
+
+                from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
+                from graphiti_core.llm_client.config import LLMConfig as CoreLLMConfig
+
+                llm_config = CoreLLMConfig(
+                    api_key=api_key,
+                    model=model,
+                    base_url=api_url,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+
+                return OpenAIGenericClient(config=llm_config, max_tokens=16384)
 
             case 'azure_openai':
                 if not HAS_AZURE_LLM:
@@ -251,28 +323,57 @@ class EmbedderFactory:
 
     @staticmethod
     def create(config: EmbedderConfig) -> EmbedderClient:
-        """Create an Embedder client based on the configured provider."""
+        """Create an Embedder client based on the configured provider.
+
+        Environment variables take precedence over config file values.
+        """
         import logging
+        import os
 
         logger = logging.getLogger(__name__)
 
-        provider = config.provider.lower()
+        # Check environment variables FIRST
+        env_provider = os.environ.get('EMBEDDER__PROVIDER')
+        env_model = os.environ.get('EMBEDDER__MODEL')
+        env_dimensions = os.environ.get('EMBEDDER__DIMENSIONS')
+
+        provider = (env_provider or config.provider).lower()
+        model = env_model or config.model
+        dimensions = int(env_dimensions) if env_dimensions else (config.dimensions or 1536)
+
+        logger.info(
+            f'Embedder configuration - provider: {provider}, model: {model} (env override: {env_provider is not None})'
+        )
 
         match provider:
             case 'openai':
-                if not config.providers.openai:
+                import os
+
+                # Check env vars first
+                env_api_key = os.environ.get('EMBEDDER__PROVIDERS__OPENAI__API_KEY')
+                env_api_url = os.environ.get('EMBEDDER__PROVIDERS__OPENAI__API_URL')
+
+                if not config.providers.openai and not env_api_key:
                     raise ValueError('OpenAI provider configuration not found')
 
-                api_key = config.providers.openai.api_key
+                api_key = (
+                    env_api_key or config.providers.openai.api_key
+                    if config.providers.openai
+                    else None
+                )
+                api_url = env_api_url or (
+                    config.providers.openai.api_url if config.providers.openai else None
+                )
+
                 _validate_api_key('OpenAI Embedder', api_key, logger)
 
                 from graphiti_core.embedder.openai import OpenAIEmbedderConfig
 
                 embedder_config = OpenAIEmbedderConfig(
                     api_key=api_key,
-                    embedding_model=config.model,
-                    base_url=config.providers.openai.api_url,  # Support custom endpoints like Ollama
-                    embedding_dim=config.dimensions,  # Support custom embedding dimensions
+                    embedding_model=model,
+                    base_url=api_url,
+                    embedding_dim=dimensions,
                 )
                 return OpenAIEmbedder(config=embedder_config)
 

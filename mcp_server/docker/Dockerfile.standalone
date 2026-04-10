@@ -24,35 +24,32 @@ ENV UV_COMPILE_BYTECODE=1 \
     MCP_SERVER_HOST="0.0.0.0" \
     PYTHONUNBUFFERED=1
 
-# Set up MCP server directory
-WORKDIR /app/mcp
+# Set up app directory
+WORKDIR /app
 
 # Accept graphiti-core version as build argument
 ARG GRAPHITI_CORE_VERSION=0.28.1
 
-# Copy project files for dependency installation
-COPY pyproject.toml uv.lock ./
+# Set up MCP server directory
+WORKDIR /app/mcp
 
-# Remove the local path override for graphiti-core in Docker builds
-# Install with BOTH neo4j and falkordb extras for maximum flexibility
-# and regenerate lock file to match the PyPI version
-RUN sed -i '/\[tool\.uv\.sources\]/,/graphiti-core/d' pyproject.toml && \
-    sed -i "s/graphiti-core\[falkordb\][>=]\+[0-9]\+\.[0-9]\+\.[0-9]\+/graphiti-core[neo4j,falkordb]==${GRAPHITI_CORE_VERSION}/" pyproject.toml && \
-    echo "Regenerating lock file for PyPI graphiti-core..." && \
-    rm -f uv.lock && \
-    uv lock
+# Copy MCP server project files
+COPY mcp_server/pyproject.toml mcp_server/uv.lock ./
 
-# Install Python dependencies (exclude dev dependency group)
+# Install MCP server dependencies (exclude dev dependency group)
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-group dev
 
+# Copy modified graphiti_core files to override installed version
+COPY graphiti_core/llm_client/openai_generic_client.py /app/mcp/.venv/lib/python3.11/site-packages/graphiti_core/llm_client/openai_generic_client.py
+
 # Store graphiti-core version
-RUN echo "${GRAPHITI_CORE_VERSION}" > /app/mcp/.graphiti-core-version
+RUN echo "local" > /app/mcp/.graphiti-core-version
 
 # Copy MCP server application code
-COPY main.py ./
-COPY src/ ./src/
-COPY config/ ./config/
+COPY mcp_server/main.py ./
+COPY mcp_server/src/ ./src/
+COPY mcp_server/config/ ./config/
 
 # Create log directory
 RUN mkdir -p /var/log/graphiti
